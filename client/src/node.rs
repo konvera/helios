@@ -12,17 +12,17 @@ use config::Config;
 use execution::state::State;
 
 use consensus::database::Database;
-use consensus::rpc::nimbus_rpc::NimbusRpc;
-use consensus::ConsensusClient;
 use execution::evm::Evm;
 use execution::rpc::http_rpc::HttpRpc;
 use execution::types::CallOpts;
 use execution::ExecutionClient;
 
 use crate::errors::NodeError;
+use consensus_poa::rpc::http_rpc::HttpRpc as PoAHttpRpc;
+use consensus_poa::consensus_poa::ConsensusClientPoA;
 
 pub struct Node<DB: Database> {
-    pub consensus: ConsensusClient<NimbusRpc, DB>,
+    pub consensus: ConsensusClientPoA<PoAHttpRpc, DB>,
     pub execution: Arc<ExecutionClient<HttpRpc>>,
     pub config: Arc<Config>,
     pub history_size: usize,
@@ -33,8 +33,9 @@ impl<DB: Database> Node<DB> {
         let consensus_rpc = &config.consensus_rpc;
         let execution_rpc = &config.execution_rpc;
 
-        let mut consensus = ConsensusClient::new(consensus_rpc, config.clone())
-            .map_err(NodeError::ConsensusClientCreationError)?;
+        let mut consensus = 
+            ConsensusClientPoA::new(consensus_rpc, config.clone())
+            .map_err(NodeError::ConsensusClientCreationError).unwrap();
 
         let block_recv = consensus.block_recv.take().unwrap();
         let finalized_block_recv = consensus.finalized_block_recv.take().unwrap();

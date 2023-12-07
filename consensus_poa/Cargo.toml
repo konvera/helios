@@ -1,5 +1,5 @@
 [package]
-name = "client"
+name = "consensus_poa"
 version = "0.5.1"
 edition = "2021"
 
@@ -15,9 +15,17 @@ thiserror.workspace = true
 tokio.workspace = true
 zduny-wasm-timer.workspace = true
 
+# async/futures
+async-trait.workspace = true
+
+# misc
+chrono.workspace = true
+
+reth-primitives = { git = "https://github.com/paradigmxyz/reth" }
+revm-precompile = { version = "2.0.2" }
+
 common = { path = "../common" }
 consensus = { path = "../consensus" }
-consensus_poa = { path = "../consensus_poa" }
 execution = { path = "../execution" }
 config = { path = "../config" }
 
