@@ -2,18 +2,14 @@ use std::marker::PhantomData;
 use std::process;
 use std::sync::Arc;
 use chrono::Duration;
-use consensus::errors::ConsensusError;
-use reth_primitives::B64;
-use reth_primitives::Bloom;
-use reth_primitives::hex::FromHex;
-use reth_primitives::revm_primitives::FixedBytes;
 
+use crate::consensus::Consensus;
 use crate::rpc::ExecutionRpc;
 
 use eyre::Result;
 use ssz_rs::prelude::*;
 use tokio::sync::mpsc::Sender;
-use tracing::{error, warn, info};
+use tracing::{error, warn};
 use zduny_wasm_timer::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc::channel;
@@ -24,8 +20,6 @@ use common::types::Block;
 use config::Config;
 
 use consensus::database::Database;
-
-use reth_primitives::{Header, Address, revm::env::recover_header_signer};
 
 #[allow(dead_code)] 
 pub struct ConsensusClientPoA<R: ExecutionRpc, DB: Database> {
@@ -42,8 +36,7 @@ pub struct Inner<R: ExecutionRpc> {
     rpc: R,
     block_send: Sender<Block>,
     finalized_block_send: watch::Sender<Option<Block>>,
-    latest_block: Option<Block>,
-    signers: Vec<Address>,
+    consensus: Consensus,
     pub config: Arc<Config>,
 }
 
@@ -118,45 +111,6 @@ impl<R: ExecutionRpc, DB: Database> ConsensusClientPoA<R, DB> {
     }
 }
 
-fn verify(block: &Block) -> Address {
-    let header = extract_header(&block).unwrap();
-
-    // TODO: can this kill the client if it recieves a malicous block?
-    let creator: Address = recover_header_signer(&header).unwrap_or_else(|err| {
-        panic!(
-            "Failed to recover Clique Consensus signer from header ({}, {}) using extradata {}: {:?}",
-            header.number, header.hash_slow(), header.extra_data, err
-        )
-    });
-
-    return creator;
-}
-
-pub fn extract_header(block: &Block) -> Result<Header> {
-    Ok(Header {   
-        parent_hash: FixedBytes::new(block.parent_hash.into()),
-        ommers_hash: FixedBytes::new(block.sha3_uncles.into()),
-        beneficiary: Address::new(block.miner.into()),
-        state_root: FixedBytes::new(block.state_root.into()),
-        transactions_root: FixedBytes::new(block.transactions_root.into()),
-        receipts_root: FixedBytes::new(block.receipts_root.into()),
-        withdrawals_root: None,
-        logs_bloom: Bloom { 0: FixedBytes::new(block.logs_bloom.to_vec().try_into().unwrap()) },
-        timestamp: block.timestamp.as_u64(),
-        mix_hash: FixedBytes::new(block.mix_hash.into()),
-        nonce: u64::from_be_bytes(B64::from_hex(block.nonce.clone())?.try_into()?),
-        base_fee_per_gas: None,
-        number: block.number.as_u64(),
-        gas_limit: block.gas_limit.as_u64(),
-        difficulty: block.difficulty.into(),
-        gas_used: block.gas_used.as_u64(),
-        extra_data: block.extra_data.0.clone().into(),
-        parent_beacon_block_root: None,
-        blob_gas_used: None,
-        excess_blob_gas: None,
-    })
-}
-
 impl<R: ExecutionRpc> Inner<R> {
     pub fn new(
         rpc: &str,
@@ -166,65 +120,29 @@ impl<R: ExecutionRpc> Inner<R> {
     ) -> Result<Self> {
         let rpc = R::new(rpc)?;
 
-        let signers = [
-            Address::from_hex("0x0981717712ed2c4919fdbc27dfc804800a9eeff9")?,
-            Address::from_hex("0x0e5b9aa4925ed1beeb08d1c5a92477a1b719baa7")?,
-            Address::from_hex("0x0e8705e07bbe1ce2c39093df3d20aaa5120bfc7a")?,
-        ].to_vec();
+        let consensus = Consensus::new()?;
 
         Ok(Inner {
             rpc,
             block_send,
             finalized_block_send,
-            latest_block: None,
+            consensus,
             config,
-            signers,
         })
     }
 
     pub async fn sync(&mut self) -> Result<()> {
-
         let block = self.rpc.get_latest_block().await?;
-        let creator = verify(&block);
 
-        if !self.signers.contains(&creator) {
-            error!(
-                target: "helios::consensus", 
-                "sync block contains invalid block creator: {}",
-                creator
-            );
-            return Err(ConsensusError::InvalidSignature.into());
-        }
-
-        info!(
-            target: "helios::consensus",
-            "PoA consensus client in sync with block: {}: {:#?}",
-            &block.number, &block.hash
-        );
-
-        self.latest_block = Some(block);
-
-        Ok(())
+        self.consensus.sync(block)
     }
-
-
-    
-    pub async fn send_blocks(&self) -> Result<()> {
-
-        if let Some(latest_block) = &self.latest_block {
-            self.block_send.send(latest_block.clone()).await?;
-        }
-
-        Ok(())
-    }
-
 
     /// Gets the duration until the next update
     /// Updates are scheduled for 2 seconds into each slot
     pub fn duration_until_next_update(&self) -> Duration {
 
         let mut next_update = 1;
-        if let Some(latest_block) = &self.latest_block {
+        if let Some(latest_block) = &self.consensus.latest_block {
             let next_slot_timestamp = latest_block.timestamp.as_u64() + 4;
 
             let now = SystemTime::now()
@@ -238,29 +156,20 @@ impl<R: ExecutionRpc> Inner<R> {
 
         Duration::seconds(next_update as i64)
     }
+    
+    pub async fn send_blocks(&self) -> Result<()> {
 
-    pub async fn advance(&mut self) -> Result<()> {
-        let block = self.rpc.get_block_by_number(self.latest_block.as_ref().unwrap().number.as_u64()+1).await?;
-
-        let creator = verify(&block);
-
-        if !self.signers.contains(&creator) {
-            error!(
-                target: "helios::consensus", 
-                "advance block contains invalid block creator: {}",
-                creator
-            );
-            return Err(ConsensusError::InvalidSignature.into());
+        if let Some(latest_block) = &self.consensus.latest_block {
+            self.block_send.send(latest_block.clone()).await?;
         }
 
-        info!(
-            target: "helios::consensus",
-            "PoA consensus client advanced to block {}: {:#?}",
-            &block.number, &block.hash
-        );
-
-        self.latest_block = Some(block);
-
         Ok(())
+    }
+
+    pub async fn advance(&mut self) -> Result<()> {
+        let next_block_number = self.consensus.latest_block.as_ref().unwrap().number.as_u64()+1;
+        let block = self.rpc.get_block_by_number(next_block_number).await?;
+
+        self.consensus.advance(block)
     }
 }

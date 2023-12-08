@@ -19,7 +19,7 @@ use execution::ExecutionClient;
 
 use crate::errors::NodeError;
 use consensus_poa::rpc::http_rpc::HttpRpc as PoAHttpRpc;
-use consensus_poa::consensus_poa::ConsensusClientPoA;
+use consensus_poa::client::ConsensusClientPoA;
 
 pub struct Node<DB: Database> {
     pub consensus: ConsensusClientPoA<PoAHttpRpc, DB>,

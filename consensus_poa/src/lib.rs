@@ -1,5 +1,7 @@
-pub mod consensus_poa;
-pub use crate::consensus_poa::*;
+pub mod client;
+pub use crate::client::*;
+
+pub mod consensus;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod rpc;
